@@ -1,0 +1,72 @@
+@import url('https://api.fontshare.com/v2/css?f[]=clash-display@400,500,600,700&f[]=general-sans@300,400,500,600&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Theme Tokens ─── */
+:root {
+  --bg: #f2f2f2;
+  --fg: #111111;
+}
+.dark {
+  --bg: #0e0e0e;
+  --fg: #f5f5f5;
+}
+
+/* ─── Reset ─── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: auto;
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+  transition: background-color 0.5s ease, color 0.5s ease;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 2px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.15); border-radius: 8px; }
+
+/* ─── Selection ─── */
+::selection { background: rgba(128,128,128,0.12); color: inherit; }
+
+/* ─── Canvas ─── */
+canvas {
+  display: block;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+}
+
+/* ─── Sticky viewport ─── */
+.scroll-sequence-sticky {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  touch-action: pan-y;
+}
+
+/* ─── Hide scrollbar (portfolio conveyor belt) ─── */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+
+/* ─── Marquee Auto-Scroll ─── */
+@keyframes marquee {
+  0% { transform: translateX(0%); }
+  100% { transform: translateX(-50%); }
+}
+.animate-marquee {
+  animation: marquee 25s linear infinite;
+}

@@ -1,0 +1,17 @@
+{
+  "name": "Krishnaprasath Portfolio",
+  "short_name": "Krish Portfolio",
+  "description": "Cinematic video editing and motion design portfolio by Krishnaprasath.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0e0e0e",
+  "theme_color": "#0e0e0e",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon"
+    }
+  ]
+}
