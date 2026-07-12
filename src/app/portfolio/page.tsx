@@ -67,23 +67,65 @@ function VideoModal({
   onClose: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previouslyFocusedRef = useRef<Element | null>(null);
 
-  // Auto-play on mount
+  // Capture previously focused element and auto-play
   useEffect(() => {
+    previouslyFocusedRef.current = document.activeElement;
     videoRef.current?.play().catch(() => {});
   }, []);
 
-  // Close on Escape
+  // Focus trap + Escape key
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+
+      if (e.key === "Tab") {
+        const dialog = dialogRef.current;
+        if (!dialog) return;
+
+        const focusable = dialog.querySelectorAll<HTMLElement>(
+          'button, [href], video, [tabindex]:not([tabindex="-1"]), input, select, textarea'
+        );
+        if (focusable.length === 0) return;
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
     };
+
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
 
+  // Restore focus on unmount
+  useEffect(() => {
+    return () => {
+      if (previouslyFocusedRef.current instanceof HTMLElement) {
+        previouslyFocusedRef.current.focus();
+      }
+    };
+  }, []);
+
   return (
     <motion.div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Portfolio video player"
@@ -96,6 +138,7 @@ function VideoModal({
     >
       {/* Close Button */}
       <button
+        autoFocus
         onClick={onClose}
         className="absolute top-4 right-4 z-10 w-10 h-10 flex items-center justify-center rounded-full bg-white/10 hover:bg-white/20 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
         aria-label="Close video"
@@ -485,7 +528,7 @@ export default function PortfolioPage() {
 
       {/* ── Sticky Mobile CTA ── */}
       {!activeVideo && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 md:hidden p-3">
+        <div className="fixed bottom-0 left-0 right-0 z-40 md:hidden p-3 pb-[calc(12px+env(safe-area-inset-bottom))]">
           <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-2xl p-3">
             <a
               href={WA_LINK}

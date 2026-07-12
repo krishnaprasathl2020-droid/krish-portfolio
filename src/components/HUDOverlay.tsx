@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { motion, MotionValue, type Transition } from "framer-motion";
 import { useState, useEffect } from "react";
@@ -213,8 +213,8 @@ const PHASE_CONFIGS: PhaseConfig[] = [
       headlineStart: 0,
       descriptionStart: 0,
       supportingStart: 0,
-      contentEnd: 0.24,
-      sceneEnd: 0.30,
+      contentEnd: 0.32,
+      sceneEnd: 0.35,
     },
     mobileTimeline: timelineFromFrames({
       sceneStart: 0,
@@ -222,8 +222,8 @@ const PHASE_CONFIGS: PhaseConfig[] = [
       headlineStart: 0,
       descriptionStart: 0,
       supportingStart: 0,
-      contentEnd: 20,
-      sceneEnd: 30,
+      contentEnd: 70,
+      sceneEnd: 80,
     }),
     animation: DEFAULT_PHASE_ANIMATION,
   },
@@ -265,20 +265,20 @@ const PHASE_CONFIGS: PhaseConfig[] = [
     timeline: {
       sceneStart: 0.32,
       contentStart: 0.32,
-      headlineStart: 0.35,
-      descriptionStart: 0.39,
-      supportingStart: 0.44,
-      contentEnd: 0.60,
-      sceneEnd: 0.64,
+      headlineStart: 0.32,
+      descriptionStart: 0.32,
+      supportingStart: 0.32,
+      contentEnd: 0.64,
+      sceneEnd: 0.67,
     },
     mobileTimeline: timelineFromFrames({
       sceneStart: 70,
       contentStart: 70,
-      headlineStart: 79,
-      descriptionStart: 92,
-      supportingStart: 107,
-      contentEnd: 170,
-      sceneEnd: 188,
+      headlineStart: 70,
+      descriptionStart: 70,
+      supportingStart: 70,
+      contentEnd: 189,
+      sceneEnd: 200,
     }),
     animation: DEFAULT_PHASE_ANIMATION,
     logos: {
@@ -935,3 +935,4 @@ export const FloatingLogos = ({
     </div>
   );
 };
+
