@@ -211,17 +211,14 @@ export default function ScrollSequence() {
       rafRef.current = requestAnimationFrame(() => drawFrame(currentFrameRef.current));
     };
 
-    const loadFrame = (index: number, isStartupFrame = false) => (
+    const loadFrame = (index: number, isStartupFrame = false) =>
       new Promise<boolean>((resolve) => {
         const img = new Image();
-        img.decoding = "async";
         img.setAttribute("fetchpriority", isStartupFrame ? "high" : "low");
+        img.src = getFramePath(index);
 
-        const onLoad = () => {
-          if (isCancelled) {
-            resolve(false);
-            return;
-          }
+        img.decode().then(() => {
+          if (isCancelled) { resolve(false); return; }
 
           images[index] = img;
           loadedFrameIndexesRef.current.add(index);
@@ -234,21 +231,14 @@ export default function ScrollSequence() {
           }
 
           resolve(true);
-        };
-
-        const onError = () => {
+        }).catch(() => {
           if (!isCancelled && isStartupFrame) {
             startupLoadedCount++;
             setLoadProgress(Math.round((startupLoadedCount / STARTUP_FRAME_COUNT) * 100));
           }
           resolve(false);
-        };
-
-        img.onload = onLoad;
-        img.onerror = onError;
-        img.src = getFramePath(index);
-      })
-    );
+        });
+      });
 
     const loadRemainingFrames = async () => {
       let nextFrameIndex = STARTUP_FRAME_COUNT;
