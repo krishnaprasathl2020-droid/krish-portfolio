@@ -89,6 +89,7 @@ export default function ScrollSequence() {
   const scrollProgressRef = useRef(0);
   const rafRef = useRef<number>(0);
   const sizeRef = useRef({ w: 0, h: 0, dpr: 1 });
+  const lastDrawnFrameRef = useRef(-1);
 
   const [isLoaded, setIsLoaded] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
@@ -130,7 +131,7 @@ export default function ScrollSequence() {
   const drawFrame = useCallback((frameIndex: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
+    const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
     const resolvedFrameIndex = getNearestLoadedFrameIndex(frameIndex);
@@ -153,7 +154,11 @@ export default function ScrollSequence() {
     }
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, vw, vh); // Clear for transparency
+
+    // Use "copy" composite to atomically replace canvas content in a single drawImage.
+    // This eliminates the blank frame that clearRect + source-over produces when the
+    // mobile compositor samples the canvas between the two operations.
+    ctx.globalCompositeOperation = "copy";
 
     if (isMobileRef.current) {
       // True 'Contain' Scaling Math (Works universally on all devices)
@@ -192,6 +197,9 @@ export default function ScrollSequence() {
 
       ctx.drawImage(img, drawX, drawY, drawW, drawH);
     }
+
+    ctx.globalCompositeOperation = "source-over";
+    lastDrawnFrameRef.current = resolvedFrameIndex;
   }, [getNearestLoadedFrameIndex]);
 
   /* ─── Progressive Frame Loading ─── */
@@ -241,12 +249,24 @@ export default function ScrollSequence() {
       });
 
     const loadRemainingFrames = async () => {
+      // Prioritize transition boundary frames so fast mobile scrolling
+      // cannot outrun the background loader at phase transition points.
+      // Phase 1→2 at progress ~0.32 (frame ~99), Phase 2→3 at ~0.64 (frame ~198).
+      const transitionFrames = [
+        ...Array.from({ length: 16 }, (_, i) => 90 + i),   // 90–105
+        ...Array.from({ length: 21 }, (_, i) => 190 + i),  // 190–210
+      ].filter((i) => !loadedFrameIndexesRef.current.has(i));
+
+      await Promise.all(transitionFrames.map((i) => loadFrame(i)));
+
+      // Then fill in all remaining frames sequentially, skipping already-loaded ones
       let nextFrameIndex = STARTUP_FRAME_COUNT;
 
       const worker = async () => {
         while (!isCancelled && nextFrameIndex < TOTAL_FRAMES) {
           const frameIndex = nextFrameIndex;
           nextFrameIndex++;
+          if (loadedFrameIndexesRef.current.has(frameIndex)) continue;
           await loadFrame(frameIndex);
         }
       };
