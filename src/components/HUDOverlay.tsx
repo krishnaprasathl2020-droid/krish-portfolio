@@ -1,7 +1,7 @@
-﻿"use client";
+"use client";
 
 import { motion, MotionValue, type Transition } from "framer-motion";
-import { useState, useEffect } from "react";
+import { useState, useEffect, startTransition } from "react";
 
 interface HUDOverlayProps {
   scrollYProgress: MotionValue<number>;
@@ -529,7 +529,9 @@ export default function HUDOverlay({ scrollYProgress }: HUDOverlayProps) {
 
   useEffect(() => {
     return scrollYProgress.on("change", (v) => {
-      setScrollProgress(v);
+      startTransition(() => {
+        setScrollProgress(v);
+      });
     });
   }, [scrollYProgress]);
 

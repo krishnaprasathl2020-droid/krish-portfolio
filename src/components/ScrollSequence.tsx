@@ -14,7 +14,6 @@ const BACKGROUND_LOAD_CONCURRENCY = 8;
 
 /* ─── Mobile Performance Constants ─── */
 const MOBILE_MAX_DPR = 1.5;           // Cap canvas resolution (iPhone 3x → 1.5x = 4x fewer pixels)
-const MOBILE_FRAME_INTERVAL_MS = 33;  // ~30fps render cap on mobile
 const MOBILE_MEMORY_RADIUS = 100;     // Keep ±100 frames in memory on mobile
 const MOBILE_EVICT_INTERVAL = 30;     // Run memory eviction every N scroll events
 const MOBILE_LOAD_CONCURRENCY = 4;    // Reduced background concurrency on mobile
@@ -106,8 +105,6 @@ export default function ScrollSequence() {
   const lastDrawnFrameRef = useRef(-1);
 
   /* ─── Mobile performance refs ─── */
-  const lastDrawTimeRef = useRef(0);
-  const trailRafRef = useRef(0);
   const evictCounterRef = useRef(0);
   const loadFrameFnRef = useRef<((index: number) => Promise<boolean>) | null>(null);
   const loadingInProgressRef = useRef<Set<number>>(new Set());
@@ -122,8 +119,15 @@ export default function ScrollSequence() {
 
   /* ─── Detect mobile (< 768px) for object-position logic ─── */
   const isMobileRef = useRef(false);
+  const initialMobileVhRef = useRef(0);
   useEffect(() => {
-    const check = () => { isMobileRef.current = window.innerWidth < 768; };
+    const check = () => { 
+      const isMobile = window.innerWidth < 768;
+      isMobileRef.current = isMobile; 
+      if (isMobile && initialMobileVhRef.current === 0) {
+        initialMobileVhRef.current = window.innerHeight;
+      }
+    };
     check();
     window.addEventListener("resize", check, { passive: true });
     return () => window.removeEventListener("resize", check);
@@ -171,7 +175,7 @@ export default function ScrollSequence() {
     const rawDpr = window.devicePixelRatio || 1;
     const dpr = isMobileRef.current ? Math.min(rawDpr, MOBILE_MAX_DPR) : rawDpr;
     const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    const vh = isMobileRef.current && initialMobileVhRef.current > 0 ? initialMobileVhRef.current : window.innerHeight;
 
     /* Resize canvas buffer only when viewport or effective DPR changes */
     if (sizeRef.current.w !== vw || sizeRef.current.h !== vh || sizeRef.current.dpr !== dpr) {
@@ -204,8 +208,14 @@ export default function ScrollSequence() {
       const safeLift = Math.min(vh * camera.focusY, Math.max(0, centeredY));
       const drawY = Math.max(0, centeredY - safeLift);
 
-      // Draw the frame
-      ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
+      // Draw the frame with rounded coordinates to prevent sub-pixel jitter
+      ctx.drawImage(
+        img, 
+        Math.round(drawX), 
+        Math.round(drawY), 
+        Math.round(drawWidth), 
+        Math.round(drawHeight)
+      );
     } else {
       // Desktop: standard cover fit
       const imgRatio = img.naturalWidth / img.naturalHeight;
@@ -353,7 +363,6 @@ export default function ScrollSequence() {
       document.body.style.overflow = "";
       document.body.style.touchAction = "";
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (trailRafRef.current) cancelAnimationFrame(trailRafRef.current);
     };
   }, [drawFrame, getNearestLoadedFrameIndex]);
 
@@ -402,29 +411,6 @@ export default function ScrollSequence() {
     if (frameIndex === lastDrawnFrameRef.current) return;
 
     if (isMobileRef.current) {
-      /* ── Mobile: throttle to ~30fps with trailing RAF ── */
-      const now = performance.now();
-      const elapsed = now - lastDrawTimeRef.current;
-
-      /* Cancel any pending trailing draw (a new one will be scheduled) */
-      if (trailRafRef.current) {
-        cancelAnimationFrame(trailRafRef.current);
-        trailRafRef.current = 0;
-      }
-
-      /* Always schedule a trailing RAF to guarantee the final scroll
-         position is rendered, even when throttled draws are skipped. */
-      trailRafRef.current = requestAnimationFrame(() => {
-        trailRafRef.current = 0;
-        if (currentFrameRef.current !== lastDrawnFrameRef.current) {
-          drawFrame(currentFrameRef.current);
-          lastDrawTimeRef.current = performance.now();
-        }
-      });
-
-      /* Throttle: skip the immediate draw if too soon */
-      if (elapsed < MOBILE_FRAME_INTERVAL_MS) return;
-
       /* Periodic memory maintenance (runs every MOBILE_EVICT_INTERVAL scroll events) */
       evictCounterRef.current++;
       if (evictCounterRef.current >= MOBILE_EVICT_INTERVAL) {
@@ -432,18 +418,13 @@ export default function ScrollSequence() {
         evictDistantFrames(frameIndex);
         demandLoadNearby(frameIndex);
       }
-
-      lastDrawTimeRef.current = now;
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = 0;
-        drawFrame(currentFrameRef.current);
-      });
-    } else {
-      /* ── Desktop: draw every frame, completely unchanged ── */
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => drawFrame(frameIndex));
     }
+
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      drawFrame(currentFrameRef.current);
+    });
   });
 
   /* ─── Resize ─── */

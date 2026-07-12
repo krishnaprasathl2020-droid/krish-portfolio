@@ -1,6 +1,6 @@
 "use client";
 
-import { motion, MotionValue, useMotionValueEvent, useReducedMotion } from "framer-motion";
+import { motion, MotionValue, useMotionValueEvent, useReducedMotion, useTransform } from "framer-motion";
 import { useState } from "react";
 
 interface MobileScrollIndicatorProps {
@@ -11,29 +11,29 @@ const FADE_START = 0.02;
 const FADE_END = 0.095;
 const IDLE_ANIMATION_END = 0.01;
 
-const getIndicatorOpacity = (progress: number) => {
-  if (progress <= FADE_START) return 1;
-  if (progress >= FADE_END) return 0;
-
-  return 1 - (progress - FADE_START) / (FADE_END - FADE_START);
-};
-
 export default function MobileScrollIndicator({
   scrollYProgress,
 }: MobileScrollIndicatorProps) {
-  const [progress, setProgress] = useState(0);
+  const opacity = useTransform(
+    scrollYProgress,
+    [0, FADE_START, FADE_END, 1],
+    [1, 1, 0, 0]
+  );
+  
+  const [shouldAnimate, setShouldAnimate] = useState(true);
   const prefersReducedMotion = useReducedMotion();
-  const opacity = getIndicatorOpacity(progress);
-  const shouldAnimate = !prefersReducedMotion && progress <= IDLE_ANIMATION_END;
 
-  useMotionValueEvent(scrollYProgress, "change", setProgress);
+  useMotionValueEvent(scrollYProgress, "change", (latest) => {
+    const isIdle = latest <= IDLE_ANIMATION_END;
+    if (shouldAnimate !== (!prefersReducedMotion && isIdle)) {
+      setShouldAnimate(!prefersReducedMotion && isIdle);
+    }
+  });
 
   return (
     <motion.div
       aria-hidden="true"
-      initial={{ opacity: 0 }}
-      animate={{ opacity }}
-      transition={{ duration: 0.35, ease: "easeOut" }}
+      style={{ opacity }}
       className="fixed left-1/2 bottom-[calc(22px+env(safe-area-inset-bottom))] z-[999998] hidden -translate-x-1/2 md:hidden pointer-events-none select-none max-md:block"
     >
       <motion.div
