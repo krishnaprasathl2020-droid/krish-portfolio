@@ -12,6 +12,13 @@ const TOTAL_FRAMES = 310;
 const STARTUP_FRAME_COUNT = 64;
 const BACKGROUND_LOAD_CONCURRENCY = 8;
 
+/* ─── Mobile Performance Constants ─── */
+const MOBILE_MAX_DPR = 1.5;           // Cap canvas resolution (iPhone 3x → 1.5x = 4x fewer pixels)
+const MOBILE_FRAME_INTERVAL_MS = 33;  // ~30fps render cap on mobile
+const MOBILE_MEMORY_RADIUS = 100;     // Keep ±100 frames in memory on mobile
+const MOBILE_EVICT_INTERVAL = 30;     // Run memory eviction every N scroll events
+const MOBILE_LOAD_CONCURRENCY = 4;    // Reduced background concurrency on mobile
+
 type MobileCameraFocus = "characterRight" | "characterLeft" | "center";
 type MobileCameraFocusY = "upperCenter";
 
@@ -48,6 +55,10 @@ const smoothstep = (value: number) => (
   value * value * (3 - 2 * value)
 );
 
+/* Pre-allocated camera result object — avoids creating a new object on every
+   scroll frame, eliminating a major source of GC pressure during scrolling. */
+const _cameraResult = { zoom: 1, focusX: 0, focusY: 0 };
+
 const getMobileCamera = (progress: number) => {
   const clampedProgress = Math.min(1, Math.max(0, progress));
   const nextIndex = MOBILE_CAMERA_SCENES.findIndex((scene) => (
@@ -60,20 +71,23 @@ const getMobileCamera = (progress: number) => {
   const rawAmount = range === 0 ? 1 : (clampedProgress - currentScene.progress) / range;
   const amount = smoothstep(Math.min(1, Math.max(0, rawAmount)));
 
-  return {
-    zoom: lerp(currentScene.zoom, nextScene.zoom, amount),
-    focusX: lerp(
-      MOBILE_CAMERA_FOCUS_X[currentScene.focus],
-      MOBILE_CAMERA_FOCUS_X[nextScene.focus],
-      amount
-    ),
-    focusY: lerp(
-      MOBILE_CAMERA_FOCUS_Y[currentScene.focusY],
-      MOBILE_CAMERA_FOCUS_Y[nextScene.focusY],
-      amount
-    ),
-  };
+  _cameraResult.zoom = lerp(currentScene.zoom, nextScene.zoom, amount);
+  _cameraResult.focusX = lerp(
+    MOBILE_CAMERA_FOCUS_X[currentScene.focus],
+    MOBILE_CAMERA_FOCUS_X[nextScene.focus],
+    amount
+  );
+  _cameraResult.focusY = lerp(
+    MOBILE_CAMERA_FOCUS_Y[currentScene.focusY],
+    MOBILE_CAMERA_FOCUS_Y[nextScene.focusY],
+    amount
+  );
+  return _cameraResult;
 };
+
+/** Transition boundary frames that must never be evicted from memory */
+const isProtectedFrame = (i: number) =>
+  (i >= 90 && i <= 105) || (i >= 190 && i <= 210);
 
 /** frame_000000.webp → frame_000309.webp */
 function getFramePath(index: number): string {
@@ -83,13 +97,20 @@ function getFramePath(index: number): string {
 export default function ScrollSequence() {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imagesRef = useRef<HTMLImageElement[]>([]);
+  const imagesRef = useRef<(HTMLImageElement | null)[]>([]);
   const loadedFrameIndexesRef = useRef<Set<number>>(new Set());
   const currentFrameRef = useRef(0);
   const scrollProgressRef = useRef(0);
   const rafRef = useRef<number>(0);
   const sizeRef = useRef({ w: 0, h: 0, dpr: 1 });
   const lastDrawnFrameRef = useRef(-1);
+
+  /* ─── Mobile performance refs ─── */
+  const lastDrawTimeRef = useRef(0);
+  const trailRafRef = useRef(0);
+  const evictCounterRef = useRef(0);
+  const loadFrameFnRef = useRef<((index: number) => Promise<boolean>) | null>(null);
+  const loadingInProgressRef = useRef<Set<number>>(new Set());
 
   const [isLoaded, setIsLoaded] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
@@ -137,14 +158,22 @@ export default function ScrollSequence() {
     const resolvedFrameIndex = getNearestLoadedFrameIndex(frameIndex);
     if (resolvedFrameIndex === null) return;
 
+    /* Skip redraw if the exact same resolved frame is already on the canvas.
+       This eliminates redundant draws when the user scrolls slowly and
+       multiple scroll events map to the same frame index. */
+    if (resolvedFrameIndex === lastDrawnFrameRef.current) return;
+
     const img = imagesRef.current[resolvedFrameIndex];
     if (!img || !img.complete || img.naturalWidth === 0) return;
 
-    const dpr = window.devicePixelRatio || 1;
+    /* DPR: cap on mobile to reduce canvas buffer size.
+       iPhone 3x DPR → 1.5x = 4x fewer pixels per drawImage call. */
+    const rawDpr = window.devicePixelRatio || 1;
+    const dpr = isMobileRef.current ? Math.min(rawDpr, MOBILE_MAX_DPR) : rawDpr;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
 
-    // Resize canvas buffer only when viewport changes
+    /* Resize canvas buffer only when viewport or effective DPR changes */
     if (sizeRef.current.w !== vw || sizeRef.current.h !== vh || sizeRef.current.dpr !== dpr) {
       canvas.width = Math.round(vw * dpr);
       canvas.height = Math.round(vh * dpr);
@@ -155,9 +184,9 @@ export default function ScrollSequence() {
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // Use "copy" composite to atomically replace canvas content in a single drawImage.
-    // This eliminates the blank frame that clearRect + source-over produces when the
-    // mobile compositor samples the canvas between the two operations.
+    /* "copy" composite atomically replaces canvas content in a single drawImage.
+       This prevents the blank frame that clearRect + source-over produces when
+       the mobile compositor samples the canvas between the two operations. */
     ctx.globalCompositeOperation = "copy";
 
     if (isMobileRef.current) {
@@ -205,7 +234,7 @@ export default function ScrollSequence() {
   /* ─── Progressive Frame Loading ─── */
   useEffect(() => {
     let isCancelled = false;
-    const images: HTMLImageElement[] = new Array(TOTAL_FRAMES);
+    const images: (HTMLImageElement | null)[] = new Array(TOTAL_FRAMES).fill(null);
     let startupLoadedCount = 0;
 
     imagesRef.current = images;
@@ -216,16 +245,25 @@ export default function ScrollSequence() {
 
     const scheduleCurrentFrameDraw = () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => drawFrame(currentFrameRef.current));
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0;
+        drawFrame(currentFrameRef.current);
+      });
     };
 
     const loadFrame = (index: number, isStartupFrame = false) =>
       new Promise<boolean>((resolve) => {
+        /* Guard: skip if already loaded or currently loading */
+        if (loadedFrameIndexesRef.current.has(index)) { resolve(true); return; }
+        if (loadingInProgressRef.current.has(index)) { resolve(true); return; }
+        loadingInProgressRef.current.add(index);
+
         const img = new Image();
         img.setAttribute("fetchpriority", isStartupFrame ? "high" : "low");
         img.src = getFramePath(index);
 
         img.decode().then(() => {
+          loadingInProgressRef.current.delete(index);
           if (isCancelled) { resolve(false); return; }
 
           images[index] = img;
@@ -240,6 +278,7 @@ export default function ScrollSequence() {
 
           resolve(true);
         }).catch(() => {
+          loadingInProgressRef.current.delete(index);
           if (!isCancelled && isStartupFrame) {
             startupLoadedCount++;
             setLoadProgress(Math.round((startupLoadedCount / STARTUP_FRAME_COUNT) * 100));
@@ -248,10 +287,11 @@ export default function ScrollSequence() {
         });
       });
 
+    /* Expose loadFrame for demand-based reloading of evicted frames */
+    loadFrameFnRef.current = (index: number) => loadFrame(index);
+
     const loadRemainingFrames = async () => {
-      // Prioritize transition boundary frames so fast mobile scrolling
-      // cannot outrun the background loader at phase transition points.
-      // Phase 1→2 at progress ~0.32 (frame ~99), Phase 2→3 at ~0.64 (frame ~198).
+      /* 1. Transition boundary frames — highest priority after startup */
       const transitionFrames = [
         ...Array.from({ length: 16 }, (_, i) => 90 + i),   // 90–105
         ...Array.from({ length: 21 }, (_, i) => 190 + i),  // 190–210
@@ -259,7 +299,11 @@ export default function ScrollSequence() {
 
       await Promise.all(transitionFrames.map((i) => loadFrame(i)));
 
-      // Then fill in all remaining frames sequentially, skipping already-loaded ones
+      /* 2. Fill remaining frames sequentially, skipping already-loaded ones.
+            On mobile, use reduced concurrency to lower memory pressure. */
+      const concurrency = isMobileRef.current
+        ? MOBILE_LOAD_CONCURRENCY
+        : BACKGROUND_LOAD_CONCURRENCY;
       let nextFrameIndex = STARTUP_FRAME_COUNT;
 
       const worker = async () => {
@@ -272,7 +316,7 @@ export default function ScrollSequence() {
       };
 
       await Promise.all(
-        Array.from({ length: BACKGROUND_LOAD_CONCURRENCY }, () => worker())
+        Array.from({ length: concurrency }, () => worker())
       );
     };
 
@@ -301,13 +345,48 @@ export default function ScrollSequence() {
 
     void loadStartupFrames();
 
+    const loadingSet = loadingInProgressRef.current;
     return () => {
       isCancelled = true;
+      loadFrameFnRef.current = null;
+      loadingSet.clear();
       document.body.style.overflow = "";
       document.body.style.touchAction = "";
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (trailRafRef.current) cancelAnimationFrame(trailRafRef.current);
     };
   }, [drawFrame, getNearestLoadedFrameIndex]);
+
+  /* ─── Mobile memory management: evict distant frames ─── */
+  const evictDistantFrames = useCallback((centerFrame: number) => {
+    if (!isMobileRef.current) return;
+    const images = imagesRef.current;
+    const loaded = loadedFrameIndexesRef.current;
+    const minKeep = Math.max(0, centerFrame - MOBILE_MEMORY_RADIUS);
+    const maxKeep = Math.min(TOTAL_FRAMES - 1, centerFrame + MOBILE_MEMORY_RADIUS);
+
+    const entries = Array.from(loaded);
+    for (let i = 0; i < entries.length; i++) {
+      const idx = entries[i];
+      if (idx >= minKeep && idx <= maxKeep) continue;
+      if (isProtectedFrame(idx)) continue;
+      images[idx] = null;
+      loaded.delete(idx);
+    }
+  }, []);
+
+  /* ─── Demand-load nearby frames that were previously evicted ─── */
+  const demandLoadNearby = useCallback((centerFrame: number) => {
+    const loadFn = loadFrameFnRef.current;
+    if (!loadFn || !isMobileRef.current) return;
+    const loaded = loadedFrameIndexesRef.current;
+    for (let offset = 0; offset <= 10; offset++) {
+      const before = centerFrame - offset;
+      const after = centerFrame + offset;
+      if (before >= 0 && !loaded.has(before)) void loadFn(before);
+      if (after < TOTAL_FRAMES && !loaded.has(after)) void loadFn(after);
+    }
+  }, []);
 
   /* ─── Scroll → Frame ─── */
   useMotionValueEvent(scrollYProgress, "change", (latest) => {
@@ -318,8 +397,53 @@ export default function ScrollSequence() {
       Math.max(0, Math.floor(latest * (TOTAL_FRAMES - 1)))
     );
     currentFrameRef.current = frameIndex;
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(() => drawFrame(frameIndex));
+
+    /* Skip entirely if same frame is already displayed */
+    if (frameIndex === lastDrawnFrameRef.current) return;
+
+    if (isMobileRef.current) {
+      /* ── Mobile: throttle to ~30fps with trailing RAF ── */
+      const now = performance.now();
+      const elapsed = now - lastDrawTimeRef.current;
+
+      /* Cancel any pending trailing draw (a new one will be scheduled) */
+      if (trailRafRef.current) {
+        cancelAnimationFrame(trailRafRef.current);
+        trailRafRef.current = 0;
+      }
+
+      /* Always schedule a trailing RAF to guarantee the final scroll
+         position is rendered, even when throttled draws are skipped. */
+      trailRafRef.current = requestAnimationFrame(() => {
+        trailRafRef.current = 0;
+        if (currentFrameRef.current !== lastDrawnFrameRef.current) {
+          drawFrame(currentFrameRef.current);
+          lastDrawTimeRef.current = performance.now();
+        }
+      });
+
+      /* Throttle: skip the immediate draw if too soon */
+      if (elapsed < MOBILE_FRAME_INTERVAL_MS) return;
+
+      /* Periodic memory maintenance (runs every MOBILE_EVICT_INTERVAL scroll events) */
+      evictCounterRef.current++;
+      if (evictCounterRef.current >= MOBILE_EVICT_INTERVAL) {
+        evictCounterRef.current = 0;
+        evictDistantFrames(frameIndex);
+        demandLoadNearby(frameIndex);
+      }
+
+      lastDrawTimeRef.current = now;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0;
+        drawFrame(currentFrameRef.current);
+      });
+    } else {
+      /* ── Desktop: draw every frame, completely unchanged ── */
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(() => drawFrame(frameIndex));
+    }
   });
 
   /* ─── Resize ─── */
@@ -328,6 +452,9 @@ export default function ScrollSequence() {
     let resizeRaf: number;
     const handleResize = () => {
       cancelAnimationFrame(resizeRaf);
+      /* Force redraw on resize even if frame index hasn't changed,
+         since the canvas buffer dimensions or DPR may have changed. */
+      lastDrawnFrameRef.current = -1;
       resizeRaf = requestAnimationFrame(() => drawFrame(currentFrameRef.current));
     };
     window.addEventListener("resize", handleResize, { passive: true });
