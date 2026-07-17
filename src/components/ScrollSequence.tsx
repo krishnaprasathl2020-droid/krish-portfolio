@@ -14,8 +14,6 @@ const BACKGROUND_LOAD_CONCURRENCY = 8;
 
 /* ─── Mobile Performance Constants ─── */
 const MOBILE_MAX_DPR = 1.5;           // Cap canvas resolution (iPhone 3x → 1.5x = 4x fewer pixels)
-const MOBILE_MEMORY_RADIUS = 100;     // Keep ±100 frames in memory on mobile
-const MOBILE_EVICT_INTERVAL = 30;     // Run memory eviction every N scroll events
 const MOBILE_LOAD_CONCURRENCY = 4;    // Reduced background concurrency on mobile
 
 type MobileCameraFocus = "characterRight" | "characterLeft" | "center";
@@ -84,9 +82,7 @@ const getMobileCamera = (progress: number) => {
   return _cameraResult;
 };
 
-/** Transition boundary frames that must never be evicted from memory */
-const isProtectedFrame = (i: number) =>
-  (i >= 90 && i <= 105) || (i >= 190 && i <= 210);
+
 
 /** frame_000000.webp → frame_000309.webp */
 function getFramePath(index: number): string {
@@ -104,8 +100,12 @@ export default function ScrollSequence() {
   const sizeRef = useRef({ w: 0, h: 0, dpr: 1 });
   const lastDrawnFrameRef = useRef(-1);
 
-  /* ─── Mobile performance refs ─── */
-  const evictCounterRef = useRef(0);
+  /* ─── Mobile video refs ─── */
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoDurationRef = useRef(0);
+  const lastSeekTimeRef = useRef(-1);
+
+  /* ─── Desktop performance refs ─── */
   const loadFrameFnRef = useRef<((index: number) => Promise<boolean>) | null>(null);
   const loadingInProgressRef = useRef<Set<number>>(new Set());
 
@@ -159,16 +159,34 @@ export default function ScrollSequence() {
     const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
-    const resolvedFrameIndex = getNearestLoadedFrameIndex(frameIndex);
-    if (resolvedFrameIndex === null) return;
+    let sourceWidth = 0;
+    let sourceHeight = 0;
+    let drawableSource: CanvasImageSource | null = null;
 
-    /* Skip redraw if the exact same resolved frame is already on the canvas.
-       This eliminates redundant draws when the user scrolls slowly and
-       multiple scroll events map to the same frame index. */
-    if (resolvedFrameIndex === lastDrawnFrameRef.current) return;
+    if (isMobileRef.current) {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2) return;
+      sourceWidth = video.videoWidth;
+      sourceHeight = video.videoHeight;
+      drawableSource = video;
+      
+      // We don't skip redraws strictly based on frameIndex for video, 
+      // because currentTime seeks might trigger multiple subtle updates.
+    } else {
+      const resolvedFrameIndex = getNearestLoadedFrameIndex(frameIndex);
+      if (resolvedFrameIndex === null) return;
+      if (resolvedFrameIndex === lastDrawnFrameRef.current) return;
 
-    const img = imagesRef.current[resolvedFrameIndex];
-    if (!img || !img.complete || img.naturalWidth === 0) return;
+      const img = imagesRef.current[resolvedFrameIndex];
+      if (!img || !img.complete || img.naturalWidth === 0) return;
+      
+      sourceWidth = img.naturalWidth;
+      sourceHeight = img.naturalHeight;
+      drawableSource = img;
+      lastDrawnFrameRef.current = resolvedFrameIndex;
+    }
+
+    if (!drawableSource || sourceWidth === 0) return;
 
     /* DPR: cap on mobile to reduce canvas buffer size.
        iPhone 3x DPR → 1.5x = 4x fewer pixels per drawImage call. */
@@ -195,10 +213,10 @@ export default function ScrollSequence() {
 
     if (isMobileRef.current) {
       // True 'Contain' Scaling Math (Works universally on all devices)
-      const scale = Math.min(vw / img.naturalWidth, vh / img.naturalHeight);
+      const scale = Math.min(vw / sourceWidth, vh / sourceHeight);
       const camera = getMobileCamera(scrollProgressRef.current);
-      const drawWidth = img.naturalWidth * scale * camera.zoom;
-      const drawHeight = img.naturalHeight * scale * camera.zoom;
+      const drawWidth = sourceWidth * scale * camera.zoom;
+      const drawHeight = sourceHeight * scale * camera.zoom;
 
       // Virtual mobile camera: pan/zoom the whole rendered sequence via drawImage destination rect.
       const centeredX = (vw - drawWidth) / 2;
@@ -210,7 +228,7 @@ export default function ScrollSequence() {
 
       // Draw the frame with rounded coordinates to prevent sub-pixel jitter
       ctx.drawImage(
-        img, 
+        drawableSource, 
         Math.round(drawX), 
         Math.round(drawY), 
         Math.round(drawWidth), 
@@ -218,7 +236,7 @@ export default function ScrollSequence() {
       );
     } else {
       // Desktop: standard cover fit
-      const imgRatio = img.naturalWidth / img.naturalHeight;
+      const imgRatio = sourceWidth / sourceHeight;
       const canvasRatio = vw / vh;
       let drawW: number, drawH: number, drawX: number, drawY: number;
 
@@ -234,24 +252,68 @@ export default function ScrollSequence() {
         drawY = 0;
       }
 
-      ctx.drawImage(img, drawX, drawY, drawW, drawH);
+      ctx.drawImage(drawableSource, drawX, drawY, drawW, drawH);
     }
 
     ctx.globalCompositeOperation = "source-over";
-    lastDrawnFrameRef.current = resolvedFrameIndex;
   }, [getNearestLoadedFrameIndex]);
 
   /* ─── Progressive Frame Loading ─── */
   useEffect(() => {
     let isCancelled = false;
+    document.body.style.overflow = "hidden";
+    document.body.style.touchAction = "none";
+
+    if (isMobileRef.current) {
+      /* ─── Mobile: MP4 Video Loading ─── */
+      const video = videoRef.current;
+      if (!video) return;
+
+      const handleLoadedMetadata = () => {
+        if (isCancelled) return;
+        videoDurationRef.current = video.duration;
+      };
+
+      const handleCanPlayThrough = () => {
+        if (isCancelled) return;
+        setLoadProgress(100);
+        setIsLoaded(true);
+        requestAnimationFrame(() => {
+          document.body.style.overflow = "";
+          document.body.style.touchAction = "";
+          drawFrame(0);
+        });
+      };
+
+      const handleSeeked = () => {
+        if (isCancelled || !isLoaded) return;
+        drawFrame(currentFrameRef.current);
+      };
+
+      video.addEventListener("loadedmetadata", handleLoadedMetadata);
+      video.addEventListener("canplaythrough", handleCanPlayThrough);
+      video.addEventListener("seeked", handleSeeked);
+
+      // Fallback if events already fired
+      if (video.readyState >= 1) handleLoadedMetadata();
+      if (video.readyState >= 3) handleCanPlayThrough();
+
+      return () => {
+        isCancelled = true;
+        video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+        video.removeEventListener("canplaythrough", handleCanPlayThrough);
+        video.removeEventListener("seeked", handleSeeked);
+        document.body.style.overflow = "";
+        document.body.style.touchAction = "";
+      };
+    }
+
+    /* ─── Desktop: 310 Image Loading ─── */
     const images: (HTMLImageElement | null)[] = new Array(TOTAL_FRAMES).fill(null);
     let startupLoadedCount = 0;
 
     imagesRef.current = images;
     loadedFrameIndexesRef.current = new Set();
-
-    document.body.style.overflow = "hidden";
-    document.body.style.touchAction = "none";
 
     const scheduleCurrentFrameDraw = () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -364,67 +426,41 @@ export default function ScrollSequence() {
       document.body.style.touchAction = "";
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [drawFrame, getNearestLoadedFrameIndex]);
-
-  /* ─── Mobile memory management: evict distant frames ─── */
-  const evictDistantFrames = useCallback((centerFrame: number) => {
-    if (!isMobileRef.current) return;
-    const images = imagesRef.current;
-    const loaded = loadedFrameIndexesRef.current;
-    const minKeep = Math.max(0, centerFrame - MOBILE_MEMORY_RADIUS);
-    const maxKeep = Math.min(TOTAL_FRAMES - 1, centerFrame + MOBILE_MEMORY_RADIUS);
-
-    const entries = Array.from(loaded);
-    for (let i = 0; i < entries.length; i++) {
-      const idx = entries[i];
-      if (idx >= minKeep && idx <= maxKeep) continue;
-      if (isProtectedFrame(idx)) continue;
-      images[idx] = null;
-      loaded.delete(idx);
-    }
-  }, []);
-
-  /* ─── Demand-load nearby frames that were previously evicted ─── */
-  const demandLoadNearby = useCallback((centerFrame: number) => {
-    const loadFn = loadFrameFnRef.current;
-    if (!loadFn || !isMobileRef.current) return;
-    const loaded = loadedFrameIndexesRef.current;
-    for (let offset = 0; offset <= 10; offset++) {
-      const before = centerFrame - offset;
-      const after = centerFrame + offset;
-      if (before >= 0 && !loaded.has(before)) void loadFn(before);
-      if (after < TOTAL_FRAMES && !loaded.has(after)) void loadFn(after);
-    }
-  }, []);
+  }, [isLoaded, drawFrame, getNearestLoadedFrameIndex]);
 
   /* ─── Scroll → Frame ─── */
   useMotionValueEvent(scrollYProgress, "change", (latest) => {
     if (!isLoaded) return;
     scrollProgressRef.current = latest;
-    const frameIndex = Math.min(
-      TOTAL_FRAMES - 1,
-      Math.max(0, Math.floor(latest * (TOTAL_FRAMES - 1)))
-    );
-    currentFrameRef.current = frameIndex;
-
-    /* Skip entirely if same frame is already displayed */
-    if (frameIndex === lastDrawnFrameRef.current) return;
 
     if (isMobileRef.current) {
-      /* Periodic memory maintenance (runs every MOBILE_EVICT_INTERVAL scroll events) */
-      evictCounterRef.current++;
-      if (evictCounterRef.current >= MOBILE_EVICT_INTERVAL) {
-        evictCounterRef.current = 0;
-        evictDistantFrames(frameIndex);
-        demandLoadNearby(frameIndex);
+      const video = videoRef.current;
+      if (video && videoDurationRef.current > 0) {
+        // We use Math.max(0.001) because currentTime = 0 on some mobile browsers can show a blank frame
+        const targetTime = Math.max(0.001, latest * videoDurationRef.current);
+        
+        // Only seek if the time has changed meaningfully (prevent micro-jitter)
+        if (Math.abs(targetTime - lastSeekTimeRef.current) > 0.01) {
+          video.currentTime = targetTime;
+          lastSeekTimeRef.current = targetTime;
+        }
       }
-    }
+    } else {
+      const frameIndex = Math.min(
+        TOTAL_FRAMES - 1,
+        Math.max(0, Math.floor(latest * (TOTAL_FRAMES - 1)))
+      );
+      currentFrameRef.current = frameIndex;
 
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = 0;
-      drawFrame(currentFrameRef.current);
-    });
+      /* Skip entirely if same frame is already displayed */
+      if (frameIndex === lastDrawnFrameRef.current) return;
+
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0;
+        drawFrame(currentFrameRef.current);
+      });
+    }
   });
 
   /* ─── Resize ─── */
@@ -466,6 +502,16 @@ export default function ScrollSequence() {
             ref={canvasRef}
             aria-hidden="true"
             className="absolute inset-0 w-full h-full z-20 pointer-events-none"
+          />
+
+          {/* Hidden video element exclusively for mobile rendering */}
+          <video
+            ref={videoRef}
+            src="/hero-sequence.mp4"
+            preload="auto"
+            playsInline
+            muted
+            className="hidden"
           />
 
         </div>
